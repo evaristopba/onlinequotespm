@@ -1,6 +1,7 @@
 {
-  "short_name": "Cotacao",
-  "name": "Cotacao Online",
+  "short_name": "Cotação",
+  "name": "Cotação Online",
+  "lang": "pt-BR",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#10b981",

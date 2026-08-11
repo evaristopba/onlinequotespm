@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, signInAnonymously } from 'firebase/auth'
-import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, arrayUnion, arrayRemove } from 'firebase/firestore'
+import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, arrayUnion } from 'firebase/firestore'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -23,16 +23,15 @@ const app = initializeApp(firebaseConfig)
 export const auth = getAuth(app)
 export const db = getFirestore(app)
 
-// Login anonimo automatico
 export const loginAnonimo = () => signInAnonymously(auth)
 
-// Gerar codigo de sala aleatorio
 export const gerarCodigo = () => {
-  return Math.random().toString(36).substring(2, 8).toUpperCase()
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let cod = ''
+  for (let i = 0; i < 6; i++) cod += chars.charAt(Math.floor(Math.random() * chars.length))
+  return cod
 }
 
-// Criar sala no Firestore
-// Gera um código único (verifica colisão antes de gravar, já que gerarCodigo() é aleatório)
 export const criarSala = async (nomeSala, produtos, criadorNome, criadorMercado) => {
   const user = auth.currentUser
   if (!user) throw new Error('Usuário não autenticado')
@@ -59,10 +58,10 @@ export const criarSala = async (nomeSala, produtos, criadorNome, criadorMercado)
   }
 
   await setDoc(salaRef, {
-    nome: nomeSala,
+    nome: nomeSala || 'Cotação',
     criadoEm: new Date().toISOString(),
     ativa: true,
-    produtos: produtos.map((p, i) => ({ id: `p${i}`, nome: p.nome, quantidade: p.quantidade })),
+    produtos: produtos.map((p, i) => ({ id: `p${i}`, nome: p.nome, quantidade: p.quantidade || '1 un', codigo: p.codigo || null })),
     participantes,
     precos: {},
   })
@@ -70,13 +69,12 @@ export const criarSala = async (nomeSala, produtos, criadorNome, criadorMercado)
   return codigo
 }
 
-// Entrar em sala existente
 export const entrarSala = async (codigo, nome, mercado) => {
   const user = auth.currentUser
   const salaRef = doc(db, 'salas', codigo)
   const snap = await getDoc(salaRef)
 
-  if (!snap.exists()) throw new Error('Sala nao encontrada')
+  if (!snap.exists()) throw new Error('Sala não encontrada. Verifique o código.')
 
   await updateDoc(salaRef, {
     [`participantes.${user.uid}`]: {
@@ -90,8 +88,6 @@ export const entrarSala = async (codigo, nome, mercado) => {
   return snap.data()
 }
 
-// Escutar sala em tempo real
-// callback recebe os dados da sala, ou null se a sala não existir (ex: código inválido)
 export const escutarSala = (codigo, callback) => {
   const salaRef = doc(db, 'salas', codigo)
   return onSnapshot(salaRef, (snap) => {
@@ -99,7 +95,6 @@ export const escutarSala = (codigo, callback) => {
   })
 }
 
-// Lancar preco
 export const lancarPreco = async (codigo, produtoId, mercado, preco) => {
   const salaRef = doc(db, 'salas', codigo)
   await updateDoc(salaRef, {
@@ -107,12 +102,11 @@ export const lancarPreco = async (codigo, produtoId, mercado, preco) => {
   })
 }
 
-// Adicionar produto
-export const adicionarProduto = async (codigo, nome, quantidade) => {
+export const adicionarProduto = async (codigo, nome, quantidade, codigoBarras = null) => {
   const salaRef = doc(db, 'salas', codigo)
   const id = `p${Date.now()}`
   await updateDoc(salaRef, {
-    produtos: arrayUnion({ id, nome, quantidade })
+    produtos: arrayUnion({ id, nome, quantidade: quantidade || '1 un', codigo: codigoBarras })
   })
   return id
 }

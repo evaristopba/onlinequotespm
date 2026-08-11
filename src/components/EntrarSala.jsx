@@ -33,6 +33,9 @@ export default function EntrarSala() {
           {carregando ? 'Entrando...' : 'Entrar na Sala'}
         </button>
       </div>
+      <p style={{ marginTop: 16, fontSize: '0.85rem', color: '#94a3b8', textAlign: 'center' }}>
+        💡 Dica: Peça o código de 6 letras para quem criou a cotação
+      </p>
     </div>
   )
 }

@@ -1,3 +1,5 @@
+import { formatarInputPreco } from '../utils/ptBR.js'
+
 export default function TabelaCotacao({ produtos, precos, participantes, meuMercado, onPrecoChange }) {
   const mercados = [...new Set(Object.values(participantes).map(p => p.mercado))]
 
@@ -31,25 +33,25 @@ export default function TabelaCotacao({ produtos, precos, participantes, meuMerc
                   return (
                     <td key={m} style={tdStyle}>
                       <input
-                        key={`${p.id}-${m}-${v ?? ''}`}
                         type="text"
-                        defaultValue={v ? v.toFixed(2).replace('.', ',') : ''}
+                        defaultValue={formatarInputPreco(v)}
                         onBlur={e => onPrecoChange(p.id, m, e.target.value)}
                         placeholder="0,00"
                         style={{
-                          width: 80, padding: '6px 8px', border: `1px solid ${isBest ? '#10b981' : '#e2e8f0'}`,
+                          width: 85, padding: '6px 8px', border: `1px solid ${isBest ? '#10b981' : '#e2e8f0'}`,
                           borderRadius: 6, textAlign: 'right', fontSize: '0.85rem',
                           background: isBest ? '#ecfdf5' : isMine ? '#eff6ff' : 'white',
                           fontWeight: isBest ? 700 : 400,
                           boxShadow: isMine ? '0 0 0 2px #93c5fd' : 'none',
+                          outline: 'none',
                         }}
                       />
                     </td>
                   )
                 })}
-                <td style={{ ...tdStyle, color: '#10b981', fontWeight: 700, background: '#ecfdf5' }}>
-                  {menor !== Infinity ? `R$ ${menor.toFixed(2).replace('.', ',')}` : '-'}
-                  {mercMenor !== '-' && <div style={{ fontSize: '0.75rem', fontWeight: 400 }}>{mercMenor}</div>}
+                <td style={{ ...tdStyle, color: '#059669', fontWeight: 700, background: '#ecfdf5' }}>
+                  {menor !== Infinity ? `R$ ${menor.toFixed(2).replace('.', ',')}` : '—'}
+                  {mercMenor !== '-' && <div style={{ fontSize: '0.72rem', fontWeight: 400, color: '#047857' }}>{mercMenor}</div>}
                 </td>
               </tr>
             )
@@ -60,5 +62,5 @@ export default function TabelaCotacao({ produtos, precos, participantes, meuMerc
   )
 }
 
-const thStyle = { padding: '10px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase' }
-const tdStyle = { padding: '10px', borderBottom: '1px solid #e2e8f0' }
+const thStyle = { padding: '10px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase', whiteSpace: 'nowrap' }
+const tdStyle = { padding: '10px', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' }

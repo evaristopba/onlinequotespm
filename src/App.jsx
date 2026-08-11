@@ -52,7 +52,7 @@ function Home() {
   return (
     <div style={{ maxWidth: 420, margin: '0 auto', padding: '40px 16px', textAlign: 'center' }}>
       <h1 style={{ fontSize: '1.8rem', color: '#1e293b', marginBottom: 8 }}>🛒 Cotação Online</h1>
-      <p style={{ color: '#64748b', marginBottom: 32 }}>Compare preços entre supermercados em grupo</p>
+      <p style={{ color: '#64748b', marginBottom: 32 }}>Compare preços entre supermercados em grupo e economize</p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <button onClick={() => navigate('/criar')}
           style={{ padding: '14px 24px', borderRadius: 10, border: 'none', background: '#10b981', color: 'white', fontWeight: 700, fontSize: '1rem' }}>
@@ -63,6 +63,9 @@ function Home() {
           🔐 Entrar com Código
         </button>
       </div>
+      <p style={{ marginTop: 24, fontSize: '0.8rem', color: '#94a3b8' }}>
+        🌎 Brasil · Fuso: America/Sao_Paulo · Moeda: BRL · Código de Barras
+      </p>
     </div>
   )
 }
