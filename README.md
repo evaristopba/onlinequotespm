@@ -1,7 +1,7 @@
 # 🛒 Cotação Online
 
-App PWA de cotação de preços entre supermercados em grupo, com scanner de código de barras.
-**Stack:** React + Vite + Firebase + Vercel · **Região:** pt-BR · **Fuso:** America/Sao_Paulo
+App PWA de cotação de preços entre supermercados em grupo, com scanner de código de barras e base de dados própria híbrida.
+**Stack:** React + Vite + Firebase + Vercel · **Região:** pt-BR
 
 ---
 
@@ -20,8 +20,7 @@ npm install
 - Ative **Firestore Database**
 
 ### 3. Pegar credenciais
-Firebase Console → ⚙️ Configurações do projeto → Seus apps → `</>` Web
-Copie o objeto `firebaseConfig` e crie o arquivo `.env`:
+Crie o arquivo `.env` na raiz:
 
 ```env
 VITE_FIREBASE_API_KEY=...
@@ -32,17 +31,26 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=...
 VITE_FIREBASE_APP_ID=...
 ```
 
-### 4. Regras do Firestore
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /salas/{sala} {
-      allow read, write: if request.auth != null;
-    }
-  }
-}
-```
+### 4. Configurar Regras do Firestore
+
+As regras de segurança estão no arquivo **`firestore.rules`** na raiz do projeto.
+
+**Como aplicar:**
+
+1. Acesse [console.firebase.google.com](https://console.firebase.google.com)
+2. Vá em **Firestore Database** → aba **Regras**
+3. Copie o conteúdo do arquivo `firestore.rules`
+4. Cole no editor de regras do Firebase
+5. Clique em **Publicar**
+
+**O que as regras fazem:**
+
+| Coleção | Read | Create | Update | Delete |
+|---|---|---|---|---|
+| `salas` | ✅ Autenticado | ✅ Autenticado | ✅ Autenticado | ✅ Autenticado |
+| `produtos` | ✅ Autenticado | ✅ Autenticado (com validação) | ❌ Não permitido | ❌ Não permitido |
+
+> **Por que produtos não pode editar/apagar?** Para proteger a base própria. Uma vez cadastrado, o produto fica disponível para todos. Se precisar corrigir, faça direto no Firebase Console.
 
 ### 5. Rodar local
 ```bash
@@ -57,39 +65,23 @@ vercel --prod
 
 ---
 
-## 📷 Scanner de Código de Barras
+## 📷 Scanner — Fluxo Híbrido
 
-O app usa a câmera do celular para escanear códigos de barras (EAN-13, UPC, etc.) e busca automaticamente o nome do produto na base **Open Food Facts**.
+1. **Base Própria** (Firestore) → produtos já cadastrados
+2. **Open Food Facts** (API online) → base mundial
+3. **Manual** → usuário digita
 
-- Ao criar uma sala ou dentro da sala, clique em **"📷 Escanear"**
-- Aponte a câmera para o código de barras do produto
-- O nome é preenchido automaticamente — você só digita a quantidade
-- Se o produto não estiver na base, você digita o nome manualmente
-
-**Permissões:** No primeiro uso, o navegador pedirá acesso à câmera. Aceite para usar o scanner.
+Quando encontra na Open Food Facts, pergunta se quer salvar na base própria.
 
 ---
 
 ## 🎮 Como usar
 
-1. **Criar:** uma pessoa cria a sala → escaneia/adiciona produtos → recebe código `#X7K9P2`
-2. **Compartilhar:** manda o link ou código no WhatsApp
-3. **Entrar:** os outros acessam com código + nome + mercado
-4. **Lançar:** cada um digita os preços que encontrou
-5. **Resultado:** lista otimizada aparece em tempo real para todos
-
----
-
-## 🌎 Configuração Regional (pt-BR)
-
-| Aspecto | Implementação |
-|---|---|
-| **Moeda** | `Intl.NumberFormat('pt-BR', {currency: 'BRL'})` |
-| **Data/Hora** | `toLocaleString('pt-BR', {timeZone: 'America/Sao_Paulo'})` |
-| **Input de preço** | Vírgula decimal: digita `22,50` → salva `22.50` |
-| **HTML lang** | `pt-BR` |
-| **PWA manifest** | `lang: pt-BR` |
-| **Fuso** | São Paulo (BRT, UTC-3) |
+1. **Criar:** escaneia/adiciona produtos → código `#X7K9P2`
+2. **Compartilhar:** manda no WhatsApp
+3. **Entrar:** código + nome + mercado
+4. **Lançar preços**
+5. **Resultado:** lista por mercado **e por categoria**
 
 ---
 
@@ -97,19 +89,20 @@ O app usa a câmera do celular para escanear códigos de barras (EAN-13, UPC, et
 
 ```
 src/
-├── main.jsx              # Entry point
-├── App.jsx               # Rotas + tratamento de erro Firebase
-├── firebase.js           # SDK + funções da sala
-├── index.css             # Estilos base
+├── main.jsx
+├── App.jsx
+├── firebase.js           # + base própria de produtos
+├── index.css
 ├── utils/
-│   ├── ptBR.js           # Helpers: moeda, data, parse de preço
-│   └── barcode.js        # Busca produto por código de barras (Open Food Facts)
+│   ├── ptBR.js
+│   └── barcode.js
 └── components/
-    ├── CriarSala.jsx     # Criação com scanner
+    ├── CriarSala.jsx     # Busca híbrida
     ├── EntrarSala.jsx
-    ├── Sala.jsx          # Cotação com scanner
+    ├── Sala.jsx          # Busca híbrida
     ├── TabelaCotacao.jsx
-    ├── ListaOtimizada.jsx
+    ├── ListaOtimizada.jsx # + agrupamento por categoria
     ├── Participantes.jsx
-    └── BarcodeScanner.jsx # Componente de scanner (html5-qrcode)
+    ├── BarcodeScanner.jsx
+    └── CadastrarProduto.jsx  # Modal para salvar na base
 ```
