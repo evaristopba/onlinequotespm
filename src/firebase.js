@@ -21,7 +21,6 @@ let app, auth, db
 if (miss.length > 0) {
   console.error('Firebase config incompleta. Variaveis ausentes:', miss.join(', '))
   console.error('Verifique se o arquivo .env existe na raiz do projeto e se o servidor foi reiniciado.')
-  // Cria stubs para nao quebrar as importacoes
   app = null
   auth = null
   db = null
