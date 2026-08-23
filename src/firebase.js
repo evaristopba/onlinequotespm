@@ -1,8 +1,9 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, signInAnonymously } from 'firebase/auth'
 import {
-  getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot,
-  arrayUnion, collection, query, where, getDocs, addDoc
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, setDoc, getDoc, updateDoc, deleteDoc, onSnapshot,
+  arrayUnion, collection, query, where, getDocs, addDoc, runTransaction
 } from 'firebase/firestore'
 
 const cfg = {
@@ -27,7 +28,16 @@ if (miss.length > 0) {
 } else {
   app = initializeApp(cfg)
   auth = getAuth(app)
-  db = getFirestore(app)
+  // Cache offline persistente (IndexedDB): mantem a sala e os precos ja vistos
+  // disponiveis quando a internet cai, e sincroniza sozinho ao voltar.
+  try {
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    })
+  } catch (e) {
+    console.warn('Cache offline indisponivel, seguindo sem persistencia:', e)
+    db = initializeFirestore(app, {})
+  }
 }
 
 export { auth, db }
@@ -71,6 +81,33 @@ export const salvarProdutoBasePropria = async (dados) => {
   return docRef.id
 }
 
+// Lista os produtos ativos da base própria, pra tela de manutenção
+export const listarBasePropria = async () => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  const snap = await getDocs(collection(db, 'produtos'))
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+}
+
+// Corrige dados de um produto já cadastrado (nome, marca, categoria, quantidade, unidade).
+// Não permite trocar o código de barras nem quem cadastrou (protegido pela regra também).
+export const editarProdutoBasePropria = async (id, dados) => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  await updateDoc(doc(db, 'produtos', id), {
+    nome: dados.nome,
+    marca: dados.marca || '',
+    categoria: dados.categoria || 'Outros',
+    quantidade: dados.quantidade || '',
+    unidade: dados.unidade || '',
+  })
+}
+
+// Ativa/desativa um produto da base (soft-delete — mantém o histórico,
+// só para de aparecer nas buscas por código de barras)
+export const definirAtivoBasePropria = async (id, ativo) => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  await updateDoc(doc(db, 'produtos', id), { ativo })
+}
+
 // ===== SALAS =====
 export const criarSala = async (nomeSala, produtos, criadorNome, criadorMercado) => {
   if (!db || !auth) throw new Error('Firebase nao inicializado')
@@ -95,15 +132,15 @@ export const criarSala = async (nomeSala, produtos, criadorNome, criadorMercado)
     nome: nomeSala || 'Cotacao',
     criadoEm: new Date().toISOString(),
     ativa: true,
+    criadorUid: user.uid,
     produtos: produtos.map((p, i) => ({
       id: `p${i}`,
       nome: p.nome,
-      quantidade: p.quantidade || '1 un',
+      quantidade: p.quantidade || '1.000 un',
       codigo: p.codigo || null,
       categoria: p.categoria || 'Outros',
     })),
     participantes,
-    precos: {},
   })
   return codigo
 }
@@ -134,10 +171,89 @@ export const escutarSala = (codigo, cb) => {
   return onSnapshot(ref, (s) => cb(s.exists() ? s.data() : null))
 }
 
-export const lancarPreco = async (codigo, produtoId, mercado, preco) => {
+export const lancarPreco = async (codigo, produtoId, mercado, preco, oferta = null) => {
   if (!db) throw new Error('Firebase nao inicializado')
-  await updateDoc(doc(db, 'salas', codigo), {
-    [`precos.${produtoId}.${mercado}`]: parseFloat(preco),
+  const precoId = `${produtoId}__${sanitizarId(mercado)}`
+  await setDoc(doc(db, 'salas', codigo, 'precos', precoId), {
+    produtoId,
+    mercado,
+    preco: parseFloat(preco),
+    // Marcacao de oferta: preco unico, sinalizando quando depende de
+    // convenio/fidelidade/clube pra valer aquele valor.
+    oferta: !!(oferta && oferta.tipo),
+    tipoOferta: (oferta && oferta.tipo) || '',
+    obsOferta: (oferta && oferta.obs) || '',
+    atualizadoPor: auth?.currentUser?.uid || null,
+    atualizadoEm: new Date().toISOString(),
+  })
+}
+
+// Escuta a subcoleção de precos e monta o mesmo formato { produtoId: { mercado: preco } }
+// que os componentes de tela ja esperam, entao nenhum componente precisa mudar.
+export const escutarPrecos = (codigo, cb) => {
+  if (!db) {
+    console.error('Firebase nao inicializado')
+    return () => {}
+  }
+  const ref = collection(db, 'salas', codigo, 'precos')
+  return onSnapshot(ref, (snap) => {
+    const precos = {}
+    snap.forEach((docSnap) => {
+      const d = docSnap.data()
+      if (!precos[d.produtoId]) precos[d.produtoId] = {}
+      precos[d.produtoId][d.mercado] = {
+        preco: d.preco,
+        oferta: !!d.oferta,
+        tipoOferta: d.tipoOferta || '',
+        obsOferta: d.obsOferta || '',
+        atualizadoEm: d.atualizadoEm || null,
+      }
+    })
+    cb(precos)
+  })
+}
+
+function sanitizarId(s) {
+  return String(s).trim().replace(/\//g, '_') || 'mercado'
+}
+
+// Edita um produto já adicionado na sala (nome, quantidade, categoria).
+// Usa transação pra não perder concorrência com outro participante adicionando
+// produto ao mesmo tempo (arrayUnion + overwrite bruto do array poderia colidir).
+export const editarProduto = async (codigo, produtoId, dadosNovos) => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  const salaRef = doc(db, 'salas', codigo)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(salaRef)
+    if (!snap.exists()) throw new Error('Sala nao encontrada')
+    const produtos = snap.data().produtos || []
+    const idx = produtos.findIndex((p) => p.id === produtoId)
+    if (idx === -1) throw new Error('Produto nao encontrado')
+    const novos = [...produtos]
+    novos[idx] = { ...novos[idx], ...dadosNovos }
+    tx.update(salaRef, { produtos: novos })
+  })
+}
+
+// Remove um produto da sala e limpa os preços associados (best-effort —
+// se algum preço de outro mercado não puder ser apagado por permissão,
+// fica órfão na subcoleção, mas nunca mais aparece na tela).
+export const removerProduto = async (codigo, produtoId) => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  try {
+    const precosRef = collection(db, 'salas', codigo, 'precos')
+    const qry = query(precosRef, where('produtoId', '==', produtoId))
+    const snap = await getDocs(qry)
+    await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)))
+  } catch (e) {
+    console.error('Erro ao limpar precos do produto removido:', e)
+  }
+  const salaRef = doc(db, 'salas', codigo)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(salaRef)
+    if (!snap.exists()) throw new Error('Sala nao encontrada')
+    const produtos = (snap.data().produtos || []).filter((p) => p.id !== produtoId)
+    tx.update(salaRef, { produtos })
   })
 }
 
@@ -145,7 +261,28 @@ export const adicionarProduto = async (codigo, nome, quantidade, codigoBarras = 
   if (!db) throw new Error('Firebase nao inicializado')
   const id = `p${Date.now()}`
   await updateDoc(doc(db, 'salas', codigo), {
-    produtos: arrayUnion({ id, nome, quantidade: quantidade || '1 un', codigo: codigoBarras, categoria }),
+    produtos: arrayUnion({ id, nome, quantidade: quantidade || '1.000 un', codigo: codigoBarras, categoria }),
   })
   return id
+}
+
+// Lista as salas onde o usuário logado participa (inclui salas antigas,
+// criadas antes do campo criadorUid existir — nelas, qualquer participante
+// conta como "dono" pra fins de limpeza, ja que não da pra saber quem criou)
+export const listarMinhasSalas = async () => {
+  if (!db || !auth?.currentUser) throw new Error('Nao autenticado')
+  const uid = auth.currentUser.uid
+  const qry = query(collection(db, 'salas'), where(`participantes.${uid}.uid`, '==', uid))
+  const snap = await getDocs(qry)
+  return snap.docs.map((d) => ({ codigo: d.id, ...d.data() }))
+}
+
+// Exclui a sala inteira. Precisa apagar a subcolecao de precos manualmente,
+// pois o Firestore nao remove subcolecoes junto com o documento pai.
+export const excluirSala = async (codigo) => {
+  if (!db) throw new Error('Firebase nao inicializado')
+  const precosRef = collection(db, 'salas', codigo, 'precos')
+  const snap = await getDocs(precosRef)
+  await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)))
+  await deleteDoc(doc(db, 'salas', codigo))
 }

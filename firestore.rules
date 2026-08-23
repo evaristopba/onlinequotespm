@@ -7,8 +7,51 @@ service cloud.firestore {
     // Cada documento = uma sala de cotação
     // ============================================
     match /salas/{salaId} {
-      // Qualquer usuário autenticado pode ler e escrever
-      allow read, write: if request.auth != null;
+      // Qualquer usuário autenticado pode ler, criar e atualizar
+      allow read, create, update: if request.auth != null;
+
+      // Quem criou a sala pode excluí-la. Salas antigas (criadas antes do
+      // campo criadorUid existir) não têm como saber quem criou — nesse
+      // caso, qualquer participante da sala pode excluí-la.
+      allow delete: if request.auth != null && (
+        ('criadorUid' in resource.data && resource.data.criadorUid == request.auth.uid)
+        || (!('criadorUid' in resource.data) && request.auth.uid in resource.data.participantes)
+      );
+
+      // ============================================
+      // SUBCOLEÇÃO: precos
+      // Cada preço é um documento próprio: { produtoId, mercado, preco, ... }
+      // Só quem está registrado naquele mercado pode gravar o preço dele.
+      // ============================================
+      match /precos/{precoId} {
+        allow read: if request.auth != null;
+
+        allow create, update: if request.auth != null
+          && request.resource.data.produtoId is string
+          && request.resource.data.mercado is string
+          && request.resource.data.preco is number
+          && request.resource.data.preco > 0
+          // Marcacao de oferta (convenio/fidelidade/clube): opcional, mas
+          // se vier tem que ter o tipo certo pra ninguem gravar lixo.
+          && (!('oferta' in request.resource.data) || request.resource.data.oferta is bool)
+          && (!('tipoOferta' in request.resource.data) || (request.resource.data.tipoOferta is string && request.resource.data.tipoOferta.size() <= 40))
+          && (!('obsOferta' in request.resource.data) || (request.resource.data.obsOferta is string && request.resource.data.obsOferta.size() <= 120))
+          && get(/databases/$(database)/documents/salas/$(salaId)).data.participantes[request.auth.uid].mercado
+             == request.resource.data.mercado;
+
+        // Só o dono daquele mercado pode apagar o próprio preço, ou quem
+        // pode excluir a sala inteira (criador, ou qualquer participante
+        // se for uma sala antiga sem criadorUid — usado pela limpeza em massa).
+        allow delete: if request.auth != null
+          && (
+            (
+              ('criadorUid' in get(/databases/$(database)/documents/salas/$(salaId)).data)
+              ? get(/databases/$(database)/documents/salas/$(salaId)).data.criadorUid == request.auth.uid
+              : request.auth.uid in get(/databases/$(database)/documents/salas/$(salaId)).data.participantes
+            )
+            || get(/databases/$(database)/documents/salas/$(salaId)).data.participantes[request.auth.uid].mercado == resource.data.mercado
+          );
+      }
     }
 
     // ============================================
@@ -29,8 +72,18 @@ service cloud.firestore {
         && request.resource.data.nome.size() > 0
         && request.resource.data.ativo == true;
 
-      // Não permite update ou delete (protege a base)
-      allow update, delete: if false;
+      // Permite CORRIGIR um produto já cadastrado (nome, marca, categoria,
+      // quantidade, unidade, ativo/inativo) — usado pela tela de Manutenção.
+      // Não deixa trocar o código de barras nem quem cadastrou originalmente.
+      allow update: if request.auth != null
+        && request.resource.data.codigoBarras == resource.data.codigoBarras
+        && request.resource.data.cadastradoPor == resource.data.cadastradoPor
+        && request.resource.data.nome is string
+        && request.resource.data.nome.size() > 0
+        && request.resource.data.ativo is bool;
+
+      // Não permite apagar — usa o campo "ativo" pra desativar sem perder histórico
+      allow delete: if false;
     }
 
   }
