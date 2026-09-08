@@ -7,15 +7,72 @@ service cloud.firestore {
     // Cada documento = uma sala de cotação
     // ============================================
     match /salas/{salaId} {
-      // Qualquer usuário autenticado pode ler, criar e atualizar
-      allow read, create, update: if request.auth != null;
+      // get = buscar UMA sala específica pelo código (é o modelo do app:
+      // "quem tem o código, acessa" — inclusive pra conferir se um
+      // código existe antes de entrar, sem ainda ser participante).
+      allow get: if request.auth != null;
+
+      // list = consultar a coleção sem um código específico. Sem essa
+      // separação, "allow read" também liberava list, e qualquer
+      // usuário anônimo conseguia enumerar TODAS as salas do banco (só
+      // com getDocs(collection(db,'salas')), sem precisar de código
+      // nenhum). Agora só quem já é participante consegue listar as
+      // PRÓPRIAS salas (usado por listarMinhasSalas), e só o admin
+      // consegue listar todas (usado por listarTodasSalas no /admin).
+      allow list: if request.auth != null && (
+        request.auth.uid in resource.data.participantes
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+
+      allow create: if request.auth != null;
+
+      // Update NÃO é mais livre. Baseado no que o app realmente faz com
+      // updateDoc()/transação na sala, só duas coisas podem mudar de cada
+      // vez — nunca o documento inteiro:
+      //
+      //  1) entrarSala() grava só a PRÓPRIA entrada em participantes
+      //     (participantes.<meu uid>) — ninguém pode escrever ou apagar
+      //     a entrada de outro participante nem trocar de "dono".
+      //  2) adicionarProduto()/editarProduto()/removerProduto() só mexem
+      //     no array `produtos` — continua liberado pra qualquer
+      //     participante, é o catálogo compartilhado da cotação.
+      //
+      // nome, criadoEm, ativa e criadorUid nunca aparecem nessas duas
+      // listas, então ficam automaticamente imutáveis após a criação —
+      // é o que fecha o "sequestro de sala" (trocar criadorUid pra depois
+      // poder excluir) e a falsificação de participante/mercado.
+      // Um admin (ver coleção `admins` no fim deste arquivo) pode
+      // reescrever o documento inteiro — é a única forma seguraде
+      // remover uma entrada fantasma de participante (sessão duplicada
+      // de outro navegador/dispositivo): o Firestore não tem como saber
+      // que duas entradas com nome+mercado iguais são "a mesma pessoa",
+      // então um participante comum nunca pode apagar a entrada alheia,
+      // só o admin.
+      allow update: if request.auth != null && (
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participantes'])
+          && request.resource.data.participantes.diff(resource.data.participantes).affectedKeys().hasOnly([request.auth.uid])
+          && request.resource.data.participantes[request.auth.uid].uid == request.auth.uid
+          && request.resource.data.participantes[request.auth.uid].nome is string
+          && request.resource.data.participantes[request.auth.uid].mercado is string
+        )
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['produtos'])
+          && request.resource.data.produtos is list
+        )
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
 
       // Quem criou a sala pode excluí-la. Salas antigas (criadas antes do
       // campo criadorUid existir) não têm como saber quem criou — nesse
-      // caso, qualquer participante da sala pode excluí-la.
+      // caso, qualquer participante da sala pode excluí-la. Um admin
+      // (ver coleção `admins` no fim deste arquivo) pode excluir QUALQUER
+      // sala — é a válvula de escape pra sala "órfã" (criador que perdeu
+      // a sessão anônima e nunca mais consegue apagar sozinho).
       allow delete: if request.auth != null && (
         ('criadorUid' in resource.data && resource.data.criadorUid == request.auth.uid)
         || (!('criadorUid' in resource.data) && request.auth.uid in resource.data.participantes)
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
 
       // ============================================
@@ -41,7 +98,9 @@ service cloud.firestore {
 
         // Só o dono daquele mercado pode apagar o próprio preço, ou quem
         // pode excluir a sala inteira (criador, ou qualquer participante
-        // se for uma sala antiga sem criadorUid — usado pela limpeza em massa).
+        // se for uma sala antiga sem criadorUid — usado pela limpeza em
+        // massa), ou um admin (idem — precisa poder limpar a subcoleção
+        // inteira antes de apagar a sala).
         allow delete: if request.auth != null
           && (
             (
@@ -50,6 +109,7 @@ service cloud.firestore {
               : request.auth.uid in get(/databases/$(database)/documents/salas/$(salaId)).data.participantes
             )
             || get(/databases/$(database)/documents/salas/$(salaId)).data.participantes[request.auth.uid].mercado == resource.data.mercado
+            || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
           );
       }
     }
@@ -75,15 +135,39 @@ service cloud.firestore {
       // Permite CORRIGIR um produto já cadastrado (nome, marca, categoria,
       // quantidade, unidade, ativo/inativo) — usado pela tela de Manutenção.
       // Não deixa trocar o código de barras nem quem cadastrou originalmente.
+      // grupoVariante (opcional) liga produtos como "mesmo item, tamanho
+      // diferente" — usado pela tela de Manutenção pra vincular/desvincular.
       allow update: if request.auth != null
         && request.resource.data.codigoBarras == resource.data.codigoBarras
         && request.resource.data.cadastradoPor == resource.data.cadastradoPor
         && request.resource.data.nome is string
         && request.resource.data.nome.size() > 0
-        && request.resource.data.ativo is bool;
+        && request.resource.data.ativo is bool
+        && (
+          !('grupoVariante' in request.resource.data)
+          || request.resource.data.grupoVariante == null
+          || (request.resource.data.grupoVariante is string && request.resource.data.grupoVariante.size() <= 60)
+        );
 
-      // Não permite apagar — usa o campo "ativo" pra desativar sem perder histórico
-      allow delete: if false;
+      // Não permite apagar — usa o campo "ativo" pra desativar sem perder
+      // histórico. Exceção: um admin (ver coleção `admins` no fim deste
+      // arquivo) pode apagar de vez, usado pra limpar lixo/duplicados
+      // que "desativar" sozinho não resolve.
+      allow delete: if request.auth != null
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // ============================================
+    // COLEÇÃO: admins
+    // Marca quem é administrador — documento com ID = uid do admin.
+    // Cada usuário só pode ler o PRÓPRIO documento (pra souAdmin() saber
+    // se é admin) — nunca a lista inteira, e nunca escrever nada aqui.
+    // É gerenciada só pelo Firebase Console (Firestore Database → criar
+    // documento admins/<uid>) ou Admin SDK, nunca pelo client SDK.
+    // ============================================
+    match /admins/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
     }
 
   }

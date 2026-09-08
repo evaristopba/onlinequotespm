@@ -1,196 +1,370 @@
-import{useEffect,useMemo,useState}from'react'
-import{useParams,useNavigate}from'react-router-dom'
-import{escutarSala,escutarPrecos,lancarPreco,adicionarProduto,editarProduto,removerProduto,excluirSala,auth,buscarProdutoBasePropria}from'../firebase.js'
-import{parsePreco,formatarDataRelativa}from'../utils/ptBR.js'
-import{buscarProdutoPorCodigo}from'../utils/barcode.js'
-import{infoPreco}from'../utils/precos.js'
-import{useOnline,salvarUltimaSala,limparUltimaSala}from'../utils/conexao.js'
-import TabelaCotacao from'./TabelaCotacao.jsx'
-import ListaOtimizada from'./ListaOtimizada.jsx'
-import Participantes from'./Participantes.jsx'
-import BarcodeScanner from'./BarcodeScanner.jsx'
-import CadastrarProduto from'./CadastrarProduto.jsx'
-import ProdutoModal from'./ProdutoModal.jsx'
-export default function Sala(){
-  const{codigo}=useParams()
-  const nav=useNavigate()
-  const online=useOnline()
-  const[sala,setSala]=useState(null)
-  const[precos,setPrecos]=useState({})
-  const[naoEncontrada,setNaoEncontrada]=useState(false)
-  const[meuMercado,setMeuMercado]=useState('')
-  const[meuNome,setMeuNome]=useState('')
-  const[mostrarScanner,setMostrarScanner]=useState(false)
-  const[mostrarCadastro,setMostrarCadastro]=useState(null)
-  const[mostrarProdutoModal,setMostrarProdutoModal]=useState(null)
-  const[buscando,setBuscando]=useState(false)
-  const[excluindo,setExcluindo]=useState(false)
-  const[aba,setAba]=useState('todos')
+import { useEffect, useMemo, useState, lazy, Suspense } from 'react'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { escutarSala, escutarPrecos, lancarPreco, adicionarProduto, editarProduto, removerProduto, excluirSala, entrarSala, auth, buscarProdutoBasePropria, listarBasePropria } from '../firebase.js'
+import { parsePreco, formatarDataRelativa } from '../utils/ptBR.js'
+import { buscarProdutoPorCodigo } from '../utils/barcode.js'
+import { infoPreco } from '../utils/precos.js'
+import { useOnline, salvarUltimaSala, limparUltimaSala } from '../utils/conexao.js'
+import TabelaCotacao from './TabelaCotacao.jsx'
+import ListaOtimizada from './ListaOtimizada.jsx'
+import VariantesComparacao from './VariantesComparacao.jsx'
+import Participantes from './Participantes.jsx'
+// html5-qrcode é pesada e só serve pra quem realmente escaneia — lazy
+// evita jogar isso no bundle inicial de todo mundo.
+const BarcodeScanner = lazy(() => import('./BarcodeScanner.jsx'))
+import CadastrarProduto from './CadastrarProduto.jsx'
+import ProdutoModal from './ProdutoModal.jsx'
+import { confirmar, avisar } from '../utils/dialog.js'
+import { linkParticipante, copiarTexto } from '../utils/linkParticipante.js'
+import { chaveMercado, listarMercadosUnicos } from '../utils/mercados.js'
 
-  useEffect(()=>{
-    const unsub=escutarSala(codigo,(d)=>{if(!d){setNaoEncontrada(true);setSala(null);return}setNaoEncontrada(false);setSala(d);const u=auth.currentUser?.uid;if(u&&d.participantes[u]){setMeuMercado(d.participantes[u].mercado);setMeuNome(d.participantes[u].nome)}})
-    return()=>unsub()
-  },[codigo])
+export default function Sala() {
+  const { codigo } = useParams()
+  const nav = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const online = useOnline()
+  const [sala, setSala] = useState(null)
+  const [precos, setPrecos] = useState({})
+  const [naoEncontrada, setNaoEncontrada] = useState(false)
+  const [meuMercado, setMeuMercado] = useState('')
+  const [meuNome, setMeuNome] = useState('')
+  const [mostrarScanner, setMostrarScanner] = useState(false)
+  const [mostrarCadastro, setMostrarCadastro] = useState(null)
+  const [mostrarProdutoModal, setMostrarProdutoModal] = useState(null)
+  const [buscando, setBuscando] = useState(false)
+  const [excluindo, setExcluindo] = useState(false)
+  const [aba, setAba] = useState('todos')
+  const [baseProdutos, setBaseProdutos] = useState([])
+  const [entrandoViaLink, setEntrandoViaLink] = useState(false)
+  const [copiadoMeuLink, setCopiadoMeuLink] = useState(false)
+  const [pendenteSala, setPendenteSala] = useState(false)
+  const [pendentePrecos, setPendentePrecos] = useState(false)
+  const sincronizando = pendenteSala || pendentePrecos
 
-  useEffect(()=>{
-    const unsub=escutarPrecos(codigo,setPrecos)
-    return()=>unsub()
-  },[codigo])
+  // Link pessoal (?nome=...&mercado=...): reentra de verdade na sala
+  // (mesma função usada pela tela "Entrar com código"), o que grava a
+  // sessão atual como participante daquele mercado — é isso que
+  // realmente libera a coluna, não só a aparência da tela. Funciona
+  // mesmo numa sessão anônima nova (outro aparelho, cache limpo etc.),
+  // que era o cenário de perder o acesso no meio da cotação.
+  useEffect(() => {
+    const nomeUrl = searchParams.get('nome')
+    const mercadoUrl = searchParams.get('mercado')
+    if (!nomeUrl || !mercadoUrl) return
+    setEntrandoViaLink(true)
+    entrarSala(codigo, nomeUrl.trim(), mercadoUrl.trim())
+      .catch(e => avisar('Não foi possível entrar automaticamente pelo link: ' + e.message))
+      .finally(() => {
+        setEntrandoViaLink(false)
+        // Tira nome/mercado da URL depois de usados — evita reenviar a
+        // cada refresh e some do histórico do navegador.
+        setSearchParams({}, { replace: true })
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codigo])
 
-  // Guarda a sala atual pra permitir retomar depois de queda de internet,
-  // fechamento do navegador ou recarregamento da PWA.
-  useEffect(()=>{if(sala)salvarUltimaSala(codigo,sala.nome)},[codigo,sala?.nome])
+  useEffect(() => {
+    listarBasePropria().then(setBaseProdutos).catch((e) => {
+      console.warn('Não foi possível carregar a base para comparar variantes:', e)
+      setBaseProdutos([])
+    })
+  }, [])
 
-  const mercados=useMemo(()=>sala?[...new Set(Object.values(sala.participantes||{}).map(p=>p.mercado))]:[],[sala])
-  const produtos=sala?.produtos||[]
-  // "Cotação completa": produtos com preço lançado em TODOS os mercados da sala.
-  const completos=useMemo(()=>{
-    if(mercados.length===0)return[]
-    return produtos.filter(p=>mercados.every(m=>{const i=infoPreco(precos[p.id]?.[m]);return i&&i.preco>0}))
-  },[produtos,precos,mercados])
-  const produtosVisiveis=aba==='completos'?completos:produtos
+  useEffect(() => {
+    const unsub = escutarSala(codigo, (d, meta) => {
+      if (!d) { setNaoEncontrada(true); setSala(null); return }
+      setNaoEncontrada(false)
+      setSala(d)
+      setPendenteSala(!!meta?.hasPendingWrites)
+      const u = auth.currentUser?.uid
+      if (u && d.participantes[u]) {
+        setMeuMercado(d.participantes[u].mercado)
+        setMeuNome(d.participantes[u].nome)
+      }
+    })
+    return () => unsub()
+  }, [codigo])
 
-  const souCriador=sala&&auth.currentUser&&(
-    'criadorUid'in sala?sala.criadorUid===auth.currentUser.uid:!!sala.participantes?.[auth.currentUser.uid]
+  useEffect(() => {
+    const unsub = escutarPrecos(codigo, (p, meta) => {
+      setPrecos(p)
+      setPendentePrecos(!!meta?.hasPendingWrites)
+    })
+    return () => unsub()
+  }, [codigo])
+
+  useEffect(() => {
+    if (sala) salvarUltimaSala(codigo, sala.nome)
+  }, [codigo, sala?.nome])
+
+  const mercados = useMemo(() => sala ? listarMercadosUnicos(sala.participantes) : [], [sala])
+  const grupoPorCodigo = useMemo(() => {
+    const mapa = {}
+    baseProdutos.forEach((b) => {
+      if (b.codigoBarras && b.grupoVariante) mapa[b.codigoBarras] = b.grupoVariante
+    })
+    return mapa
+  }, [baseProdutos])
+  const produtos = sala?.produtos || []
+  const completos = useMemo(() => {
+    if (mercados.length === 0) return []
+    return produtos.filter(p => mercados.every(m => {
+      const i = infoPreco(precos[p.id]?.[chaveMercado(m)])
+      return i && i.preco > 0
+    }))
+  }, [produtos, precos, mercados])
+  const produtosVisiveis = aba === 'completos' ? completos : produtos
+
+  const souCriador = sala && auth.currentUser && (
+    'criadorUid' in sala ? sala.criadorUid === auth.currentUser.uid : !!sala.participantes?.[auth.currentUser.uid]
   )
-  const handleExcluir=async()=>{
-    if(!confirm('Excluir essa sala e todos os preços lançados? Essa ação não pode ser desfeita.'))return
+
+  const handleExcluir = async () => {
+    const ok = await confirmar('Excluir essa sala e todos os preços lançados? Essa ação não pode ser desfeita.', { titulo: 'Encerrar sala', textoConfirmar: 'Excluir', perigo: true })
+    if (!ok) return
     setExcluindo(true)
-    try{await excluirSala(codigo);limparUltimaSala();nav('/')}
-    catch(e){alert('Erro ao excluir: '+e.message);setExcluindo(false)}
+    try { await excluirSala(codigo); limparUltimaSala(); nav('/') } catch (e) { avisar('Erro ao excluir: ' + e.message); setExcluindo(false) }
   }
 
-  const handlePreco=async(pid,m,v)=>{
-    const n=parsePreco(v)
-    if(n===null)return
-    const atual=infoPreco(precos[pid]?.[m])
-    await lancarPreco(codigo,pid,m,n,atual?.oferta?{tipo:atual.tipoOferta,obs:atual.obsOferta}:null)
-  }
-  const handleAddManual=()=>{
-    setMostrarProdutoModal({titulo:'➕ Adicionar produto',inicial:{nome:'',quantidade:'',categoria:'Outros'}})
+  const handleCopiarMeuLink = async () => {
+    const ok = await copiarTexto(linkParticipante(codigo, meuNome, meuMercado))
+    if (ok) {
+      setCopiadoMeuLink(true)
+      setTimeout(() => setCopiadoMeuLink(false), 1800)
+    } else {
+      avisar('Não foi possível copiar automaticamente. Copie a URL da barra de endereço mesmo.')
+    }
   }
 
-  const abrirLancamentoPreco=(p,aviso)=>{
-    const atual=infoPreco(precos[p.id]?.[meuMercado])
+  const handlePreco = async (pid, m, v) => {
+    const n = parsePreco(v)
+    if (n === null) return
+    const atual = infoPreco(precos[pid]?.[chaveMercado(m)])
+    await lancarPreco(codigo, pid, m, n, atual?.oferta ? { tipo: atual.tipoOferta, obs: atual.obsOferta } : null)
+  }
+
+  const handleAddManual = () => {
     setMostrarProdutoModal({
-      titulo:'💲 Lançar/atualizar preço',
-      aviso,
-      inicial:{nome:p.nome,quantidade:p.quantidade,categoria:p.categoria||'Outros',codigo:p.codigo,preco:atual?.preco,tipoOferta:atual?.tipoOferta||'',obsOferta:atual?.obsOferta||'',somentePreco:true},
-      editandoProdutoId:p.id,
-      somentePreco:true,
+      titulo: '➕ Adicionar produto',
+      inicial: { nome: '', quantidade: 1, unidade: 'un', categoria: 'Outros' }
     })
   }
 
-  const processarCodigo=async(cb)=>{
+  const abrirLancamentoPreco = (p, aviso) => {
+    const atual = infoPreco(precos[p.id]?.[chaveMercado(meuMercado)])
+    setMostrarProdutoModal({
+      titulo: '💲 Lançar/atualizar preço',
+      aviso,
+      inicial: {
+        nome: p.nome,
+        quantidade: p.quantidade,
+        unidade: p.unidade || 'un',
+        categoria: p.categoria || 'Outros',
+        codigo: p.codigo || null,
+        preco: atual?.preco,
+        tipoOferta: atual?.tipoOferta || '',
+        obsOferta: atual?.obsOferta || '',
+        somentePreco: true
+      },
+      editandoProdutoId: p.id,
+      somentePreco: true,
+    })
+  }
+
+  const processarCodigo = async (cb) => {
     setBuscando(true)
-    // 1) Se o produto JÁ está nessa cotação, não adiciona de novo:
-    //    abre direto o lançamento de preço do item existente.
-    const jaNaSala=produtos.find(p=>p.codigo&&String(p.codigo)===String(cb))
-    if(jaNaSala){
+    const jaNaSala = produtos.find(p => p.codigo && String(p.codigo) === String(cb))
+    if (jaNaSala) {
       setBuscando(false)
-      abrirLancamentoPreco(jaNaSala,`"${jaNaSala.nome}" já está nessa cotação — em vez de duplicar, atualize o preço do seu mercado.`)
+      abrirLancamentoPreco(jaNaSala, `"${jaNaSala.nome}" já está nessa cotação — em vez de duplicar, atualize o preço do seu mercado.`)
       return
     }
-    try{
-      const proprio=await buscarProdutoBasePropria(cb)
-      if(proprio){
-        setMostrarProdutoModal({titulo:'✅ Produto encontrado na base própria',inicial:{nome:proprio.nome,quantidade:proprio.quantidade||'',categoria:proprio.categoria||'Outros',codigo:proprio.codigoBarras}})
-        setBuscando(false);return
-      }
-      const off=await buscarProdutoPorCodigo(cb)
-      if(off){setMostrarCadastro({...off,codigoBarras:cb});setBuscando(false);return}
-    }catch(e){
-      console.error('Busca do código falhou (offline?):',e)
-    }
-    setMostrarProdutoModal({titulo:`🔎 Código ${cb} não encontrado — cadastre manualmente`,inicial:{nome:'',quantidade:'',categoria:'Outros',codigo:cb}})
-    setBuscando(false)
-  }
-  const handleScan=(cb)=>{setMostrarScanner(false);processarCodigo(cb)}
-  const handleSalvoNaBase=(dados)=>{
-    setMostrarCadastro(null)
-    setMostrarProdutoModal({titulo:'Confirmar produto',inicial:{nome:dados.nome,quantidade:dados.quantidade||'',categoria:dados.categoria,codigo:dados.codigo}})
-  }
-  const handleConfirmarProduto=async(dados)=>{
-    let produtoId=mostrarProdutoModal?.editandoProdutoId
-    if(produtoId){
-      if(!mostrarProdutoModal?.somentePreco){
-        await editarProduto(codigo,produtoId,{nome:dados.nome,quantidade:dados.quantidade,categoria:dados.categoria})
-      }
-    }else{
-      // Trava extra: mesmo no cadastro manual, não duplica código já existente.
-      const dup=dados.codigo?produtos.find(p=>p.codigo&&String(p.codigo)===String(dados.codigo)):null
-      if(dup){
-        setMostrarProdutoModal(null)
-        abrirLancamentoPreco(dup,`"${dup.nome}" já está na cotação com esse código de barras.`)
+    try {
+      const proprio = await buscarProdutoBasePropria(cb)
+      if (proprio) {
+        setMostrarProdutoModal({
+          titulo: '✅ Produto encontrado na base própria',
+          inicial: {
+            nome: proprio.nome,
+            quantidade: proprio.quantidade || 1,
+            unidade: proprio.unidade || 'un',
+            categoria: proprio.categoria || 'Outros',
+            codigo: proprio.codigoBarras || null
+          }
+        })
+        setBuscando(false)
         return
       }
-      produtoId=await adicionarProduto(codigo,dados.nome,dados.quantidade,dados.codigo,dados.categoria)
+      const off = await buscarProdutoPorCodigo(cb)
+      if (off) {
+        setMostrarCadastro({ ...off, codigoBarras: cb })
+        setBuscando(false)
+        return
+      }
+    } catch (e) {
+      console.error('Busca do código falhou (offline?):', e)
     }
-    if(dados.preco!=null&&meuMercado){
-      await lancarPreco(codigo,produtoId,meuMercado,dados.preco,dados.oferta)
+    setMostrarProdutoModal({
+      titulo: `🔎 Código ${cb} não encontrado — cadastre manualmente`,
+      inicial: { nome: '', quantidade: 1, unidade: 'un', categoria: 'Outros', codigo: cb }
+    })
+    setBuscando(false)
+  }
+
+  const handleScan = (cb) => {
+    setMostrarScanner(false)
+    processarCodigo(cb)
+  }
+
+  const handleSalvoNaBase = (dados) => {
+    setMostrarCadastro(null)
+    setMostrarProdutoModal({
+      titulo: 'Confirmar produto',
+      inicial: {
+        nome: dados.nome,
+        quantidade: dados.quantidade || 1,
+        unidade: dados.unidade || 'un',
+        categoria: dados.categoria,
+        codigo: dados.codigo || null
+      }
+    })
+  }
+
+  const handleConfirmarProduto = async (dados) => {
+    let produtoId = mostrarProdutoModal?.editandoProdutoId
+    
+    if (produtoId) {
+      if (!mostrarProdutoModal?.somentePreco) {
+        await editarProduto(codigo, produtoId, {
+          nome: dados.nome,
+          quantidade: dados.quantidade,
+          unidade: dados.unidade || 'un',
+          categoria: dados.categoria,
+          codigo: dados.codigo || null
+        })
+      }
+    } else {
+      const dup = dados.codigo ? produtos.find(p => p.codigo && String(p.codigo) === String(dados.codigo)) : null
+      if (dup) {
+        setMostrarProdutoModal(null)
+        abrirLancamentoPreco(dup, `"${dup.nome}" já está na cotação com esse código de barras.`)
+        return
+      }
+      produtoId = await adicionarProduto(codigo, dados.nome, dados.quantidade, dados.unidade || 'un', dados.codigo, dados.categoria)
+    }
+    
+    if (dados.preco != null && meuMercado) {
+      await lancarPreco(codigo, produtoId, meuMercado, dados.preco, dados.oferta)
     }
     setMostrarProdutoModal(null)
   }
-  const handleEditarProduto=(p)=>{
-    const atual=infoPreco(precos[p.id]?.[meuMercado])
-    setMostrarProdutoModal({titulo:'✏️ Editar produto',inicial:{nome:p.nome,quantidade:p.quantidade,categoria:p.categoria,codigo:p.codigo,preco:atual?.preco,tipoOferta:atual?.tipoOferta||'',obsOferta:atual?.obsOferta||''},editandoProdutoId:p.id})
-  }
-  const handleRemoverProduto=async(p)=>{
-    if(!confirm(`Remover "${p.nome}" da cotação? Os preços já lançados desse produto também somem.`))return
-    try{await removerProduto(codigo,p.id)}
-    catch(e){alert('Erro ao remover: '+e.message)}
+
+  // O código de barras do produto vem SEMPRE do próprio item da sala
+  // (p.codigo), nunca de busca por nome — nome não é único na base e
+  // pode trazer o código de barras de um produto diferente. Se o item
+  // ainda não tem código, o modal deixa o campo em branco e permite
+  // digitar/validar um novo (ver ProdutoModal.jsx).
+  const handleEditarProduto = (p) => {
+    setMostrarProdutoModal({
+      titulo: '✏️ Editar produto',
+      inicial: {
+        nome: p.nome,
+        quantidade: p.quantidade,
+        unidade: p.unidade || 'un',
+        categoria: p.categoria || 'Outros',
+        codigo: p.codigo || null,
+        preco: infoPreco(precos[p.id]?.[chaveMercado(meuMercado)])?.preco || null,
+        tipoOferta: infoPreco(precos[p.id]?.[chaveMercado(meuMercado)])?.tipoOferta || '',
+        obsOferta: infoPreco(precos[p.id]?.[chaveMercado(meuMercado)])?.obsOferta || '',
+      },
+      editandoProdutoId: p.id,
+    })
   }
 
-  if(naoEncontrada&&!online)return<div style={{padding:40,textAlign:'center',color:'#64748b'}}><p>📴 Sem conexão e sem dados dessa sala no cache.</p><button onClick={()=>window.location.reload()} style={{marginTop:12,padding:'10px 20px',borderRadius:8,border:'none',background:'#3b82f6',color:'white',fontWeight:700}}>Tentar novamente</button></div>
-  if(naoEncontrada)return<div style={{padding:40,textAlign:'center',color:'#64748b'}}><p>❌ Sala <strong>#{codigo}</strong> não encontrada.</p><button onClick={()=>nav('/entrar')} style={{marginTop:12,padding:'10px 20px',borderRadius:8,border:'none',background:'#3b82f6',color:'white',fontWeight:700}}>Voltar</button></div>
-  if(!sala)return<div style={{padding:40,textAlign:'center',color:'#64748b'}}>Carregando...</div>
+  const handleRemoverProduto = async (p) => {
+    const ok = await confirmar(`Remover "${p.nome}" da cotação? Os preços já lançados desse produto também somem.`, { titulo: 'Remover produto', textoConfirmar: 'Remover', perigo: true })
+    if (!ok) return
+    try { await removerProduto(codigo, p.id) } catch (e) { avisar('Erro ao remover: ' + e.message) }
+  }
 
-  return<div style={{maxWidth:960,margin:'0 auto',padding:'16px'}}>
-    {!online&&<div style={{background:'#fef3c7',border:'1px solid #fcd34d',color:'#92400e',borderRadius:10,padding:'10px 14px',marginBottom:12,fontSize:'0.85rem',fontWeight:600}}>📴 Sem internet — você continua vendo e digitando; os lançamentos sobem sozinhos quando a conexão voltar.</div>}
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10,marginBottom:16}}>
-      <div><div style={{fontSize:'0.8rem',color:'#64748b'}}>Sala · Criada {formatarDataRelativa(sala.criadoEm)}</div><div style={{fontFamily:'monospace',fontSize:'1.5rem',fontWeight:700,color:'#f59e0b',letterSpacing:3}}>#{codigo}</div></div>
-      <div style={{textAlign:'right'}}>
-        <div style={{display:'flex',alignItems:'center',gap:6,fontSize:'0.85rem',color:online?'#10b981':'#f59e0b',fontWeight:600,justifyContent:'flex-end'}}><span style={{width:8,height:8,background:online?'#10b981':'#f59e0b',borderRadius:'50%',display:'inline-block',animation:'pulse 1.5s infinite'}}></span>{online?'AO VIVO':'OFFLINE'}</div>
-        <div style={{fontSize:'0.78rem',color:'#94a3b8',marginTop:2}}>Você: <strong>{meuNome}</strong> · Mercado: <strong>{meuMercado}</strong></div>
-        {souCriador&&<button onClick={handleExcluir} disabled={excluindo} style={{marginTop:6,padding:'5px 10px',borderRadius:6,border:'1px solid #fca5a5',background:'white',color:'#ef4444',fontSize:'0.75rem',fontWeight:600}}>{excluindo?'Excluindo...':'🗑️ Encerrar sala'}</button>}
-      </div>
-    </div>
-    <Participantes participantes={sala.participantes}/>
-    <div style={{background:'white',borderRadius:12,padding:18,marginBottom:16,boxShadow:'0 1px 3px rgba(0,0,0,0.08)'}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <h3 style={{margin:0,fontSize:'1.05rem'}}>📊 Cotação em Tempo Real</h3>
-        <div style={{display:'flex',gap:8}}>
-          {buscando&&<span style={{color:'#64748b',fontSize:'0.85rem',alignSelf:'center'}}>🔍 Buscando...</span>}
-          <button onClick={()=>setMostrarScanner(true)} style={btnY}>📷 Escanear</button>
-          <button onClick={handleAddManual} style={btnW}>➕ Manual</button>
+  if (naoEncontrada && !online) return <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}><p>📴 Sem conexão e sem dados dessa sala no cache.</p><button onClick={() => window.location.reload()} style={{ marginTop: 12, padding: '10px 20px', borderRadius: 8, border: 'none', background: '#3b82f6', color: 'white', fontWeight: 700 }}>Tentar novamente</button></div>
+  if (naoEncontrada) return <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}><p>❌ Sala <strong>#{codigo}</strong> não encontrada.</p><button onClick={() => nav('/entrar')} style={{ marginTop: 12, padding: '10px 20px', borderRadius: 8, border: 'none', background: '#3b82f6', color: 'white', fontWeight: 700 }}>Voltar</button></div>
+  if (!sala) return <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>Carregando...</div>
+
+  return (
+    <div style={{ maxWidth: 960, margin: '0 auto', padding: '16px' }}>
+      {!online && <div style={{ background: '#fef3c7', border: '1px solid #fcd34d', color: '#92400e', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: '0.85rem', fontWeight: 600 }}>📴 Sem internet — você continua vendo e digitando; os lançamentos sobem sozinhos quando a conexão voltar.</div>}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+        <div><div style={{ fontSize: '0.8rem', color: '#64748b' }}>Sala · Criada {formatarDataRelativa(sala.criadoEm)}</div><div style={{ fontFamily: 'monospace', fontSize: '1.5rem', fontWeight: 700, color: '#f59e0b', letterSpacing: 3 }}>#{codigo}</div></div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.85rem', color: online ? '#10b981' : '#f59e0b', fontWeight: 600, justifyContent: 'flex-end' }}><span style={{ width: 8, height: 8, background: online ? '#10b981' : '#f59e0b', borderRadius: '50%', display: 'inline-block', animation: 'pulse 1.5s infinite' }}></span>{online ? 'AO VIVO' : 'OFFLINE'}</div>
+          {sincronizando && <div style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginTop: 2 }}>🔄 Sincronizando...</div>}
+          <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: 2 }}>Você: <strong>{meuNome}</strong> · Mercado: <strong>{meuMercado}</strong></div>
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 6, flexWrap: 'wrap' }}>
+            {meuMercado && (
+              <button onClick={handleCopiarMeuLink} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #93c5fd', background: 'white', color: copiadoMeuLink ? '#10b981' : '#3b82f6', fontSize: '0.75rem', fontWeight: 600 }}>
+                {copiadoMeuLink ? '✅ Copiado!' : '🔗 Meu link'}
+              </button>
+            )}
+            {souCriador && <button onClick={handleExcluir} disabled={excluindo} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #fca5a5', background: 'white', color: '#ef4444', fontSize: '0.75rem', fontWeight: 600 }}>{excluindo ? 'Excluindo...' : '🗑️ Encerrar sala'}</button>}
+          </div>
         </div>
       </div>
-      <div style={{display:'flex',gap:6,marginBottom:14,borderBottom:'1px solid #e2e8f0'}}>
-        <button onClick={()=>setAba('todos')} style={aba==='todos'?tabOn:tabOff}>Todos ({produtos.length})</button>
-        <button onClick={()=>setAba('completos')} style={aba==='completos'?tabOn:tabOff}>✅ Cotação completa ({completos.length})</button>
+      {entrandoViaLink && <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', color: '#1e40af', borderRadius: 10, padding: '10px 14px', marginBottom: 12, fontSize: '0.85rem', fontWeight: 600 }}>🔗 Entrando pelo seu link...</div>}
+      <Participantes participantes={sala.participantes} codigo={codigo} />
+      <div style={{ background: 'white', borderRadius: 12, padding: 18, marginBottom: 16, boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+          <h3 style={{ margin: 0, fontSize: '1.05rem' }}>📊 Cotação em Tempo Real</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {buscando && <span style={{ color: '#64748b', fontSize: '0.85rem', alignSelf: 'center' }}>🔍 Buscando...</span>}
+            <button onClick={() => setMostrarScanner(true)} style={btnY}>📷 Escanear</button>
+            <button onClick={handleAddManual} style={btnW}>➕ Manual</button>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 14, borderBottom: '1px solid #e2e8f0' }}>
+          <button onClick={() => setAba('todos')} style={aba === 'todos' ? tabOn : tabOff}>Todos ({produtos.length})</button>
+          <button onClick={() => setAba('completos')} style={aba === 'completos' ? tabOn : tabOff}>✅ Cotação completa ({completos.length})</button>
+        </div>
+        {aba === 'completos' && <p style={{ fontSize: '0.78rem', color: '#64748b', margin: '0 0 10px' }}>Produtos com preço lançado em <strong>todos</strong> os {mercados.length} mercado(s) pesquisado(s).</p>}
+        <TabelaCotacao
+          produtos={produtosVisiveis}
+          precos={precos}
+          participantes={sala.participantes}
+          meuMercado={meuMercado}
+          onPrecoChange={handlePreco}
+          onEditarProduto={handleEditarProduto}
+          onRemoverProduto={handleRemoverProduto}
+          onEditarOferta={(p) => abrirLancamentoPreco(p)}
+          vazioTexto={aba === 'completos' ? 'Nenhum produto ainda tem preço em todos os mercados.' : 'Nenhum produto na cotação. Use 📷 Escanear ou ➕ Manual.'}
+        />
       </div>
-      {aba==='completos'&&<p style={{fontSize:'0.78rem',color:'#64748b',margin:'0 0 10px'}}>Produtos com preço lançado em <strong>todos</strong> os {mercados.length} mercado(s) pesquisado(s).</p>}
-      <TabelaCotacao
-        produtos={produtosVisiveis}
-        precos={precos}
-        participantes={sala.participantes}
-        meuMercado={meuMercado}
-        onPrecoChange={handlePreco}
-        onEditarProduto={handleEditarProduto}
-        onRemoverProduto={handleRemoverProduto}
-        onEditarOferta={(p)=>abrirLancamentoPreco(p)}
-        vazioTexto={aba==='completos'?'Nenhum produto ainda tem preço em todos os mercados.':'Nenhum produto na cotação. Use 📷 Escanear ou ➕ Manual.'}
-      />
+      <VariantesComparacao produtos={sala.produtos} precos={precos} mercados={mercados} grupoPorCodigo={grupoPorCodigo} />
+      <ListaOtimizada produtos={sala.produtos} precos={precos} participantes={sala.participantes} />
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
+      {mostrarScanner && (
+        <Suspense fallback={<div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>Carregando câmera...</div>}>
+          <BarcodeScanner onScan={handleScan} onClose={() => setMostrarScanner(false)} />
+        </Suspense>
+      )}
+      {mostrarCadastro && <CadastrarProduto dadosIniciais={mostrarCadastro} onSalvo={handleSalvoNaBase} onCancelar={() => setMostrarCadastro(null)} />}
+      {mostrarProdutoModal && (
+        <ProdutoModal
+          key={mostrarProdutoModal.editandoProdutoId || 'novo'}
+          titulo={mostrarProdutoModal.titulo}
+          aviso={mostrarProdutoModal.aviso}
+          inicial={mostrarProdutoModal.inicial}
+          editandoProdutoId={mostrarProdutoModal.editandoProdutoId}
+          meuMercado={meuMercado}
+          onConfirmar={handleConfirmarProduto}
+          onCancelar={() => setMostrarProdutoModal(null)}
+        />
+      )}
     </div>
-    <ListaOtimizada produtos={sala.produtos} precos={precos} participantes={sala.participantes}/>
-    <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
-    {mostrarScanner&&<BarcodeScanner onScan={handleScan} onClose={()=>setMostrarScanner(false)}/>}
-    {mostrarCadastro&&<CadastrarProduto dadosIniciais={mostrarCadastro} onSalvo={handleSalvoNaBase} onCancelar={()=>setMostrarCadastro(null)}/>}
-    {mostrarProdutoModal&&<ProdutoModal titulo={mostrarProdutoModal.titulo} aviso={mostrarProdutoModal.aviso} inicial={mostrarProdutoModal.inicial} meuMercado={meuMercado} onConfirmar={handleConfirmarProduto} onCancelar={()=>setMostrarProdutoModal(null)}/>}
-  </div>
+  )
 }
-const btnY={padding:'8px 14px',borderRadius:8,border:'none',background:'#f59e0b',color:'white',fontWeight:600,fontSize:'0.85rem'}
-const btnW={padding:'8px 14px',borderRadius:8,border:'1px solid #e2e8f0',background:'white',color:'#1e293b',fontWeight:600,fontSize:'0.85rem'}
-const tabBase={padding:'8px 12px',border:'none',background:'none',fontWeight:700,fontSize:'0.85rem',cursor:'pointer',borderBottom:'2px solid transparent'}
-const tabOn={...tabBase,color:'#10b981',borderBottom:'2px solid #10b981'}
-const tabOff={...tabBase,color:'#94a3b8'}
+
+const btnY = { padding: '8px 14px', borderRadius: 8, border: 'none', background: '#f59e0b', color: 'white', fontWeight: 600, fontSize: '0.85rem' }
+const btnW = { padding: '8px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: 'white', color: '#1e293b', fontWeight: 600, fontSize: '0.85rem' }
+const tabBase = { padding: '8px 12px', border: 'none', background: 'none', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', borderBottom: '2px solid transparent' }
+const tabOn = { ...tabBase, color: '#10b981', borderBottom: '2px solid #10b981' }
+const tabOff = { ...tabBase, color: '#94a3b8' }

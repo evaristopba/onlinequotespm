@@ -48,13 +48,14 @@ firebase deploy --only firestore:rules
 
 | Coleção | Read | Create | Update | Delete |
 |---|---|---|---|---|
-| `salas` | ✅ Autenticado | ✅ Autenticado | ✅ Autenticado (validado) | ✅ Autenticado |
-| `salas/{id}/precos` | ✅ Autenticado | ✅ Autenticado (campos validados) | ✅ Autenticado (campos validados) | ❌ |
-| `produtos` | ✅ Autenticado | ✅ Autenticado (com validação) | ❌ Não permitido | ❌ Não permitido |
+| `salas` | ✅ Autenticado | ✅ Autenticado | ✅ Autenticado, mas só a **própria** entrada em `participantes` OU o array `produtos` — nunca o documento inteiro (impede sequestro de sala e falsificação de participante/mercado alheio) | ✅ Só quem criou a sala (ou qualquer participante, em salas antigas de antes do campo `criadorUid`), **ou um admin** |
+| `salas/{id}/precos` | ✅ Autenticado | ✅ Autenticado (campos validados) | ✅ Autenticado (campos validados, só o dono daquele mercado) | ✅ Dono do mercado, ou quem pode excluir a sala inteira |
+| `produtos` | ✅ Autenticado | ✅ Autenticado (com validação) | ✅ Autenticado — só `nome`, `marca`, `categoria`, `quantidade`, `unidade`, `ativo` e `grupoVariante` (nunca `codigoBarras` nem quem cadastrou) | ❌ Ninguém apaga de vez, **exceto um admin** (uso normal continua sendo "desativar") |
+| `admins` | ✅ Só o próprio (`admins/<meu uid>`) | ❌ | ❌ | ❌ (gerenciado só pelo Firebase Console) |
 
 Os campos aceitos em `precos` incluem `preco`, `oferta`, `tipoOferta` e `obsOferta`.
 
-> **Por que produtos não pode editar/apagar?** Para proteger a base própria. Uma vez cadastrado, o produto fica disponível para todos. Correções podem ser feitas pelo Firebase Console.
+> **Por que `codigoBarras` não pode ser alterado?** Pra proteger a base própria: é a chave que liga o produto físico ao cadastro, então corrigi-lo por engano quebraria o histórico de cotações antigas. Correções desse campo específico exigem o Firebase Console. Todo o resto (nome, categoria, quantidade, variantes) pode ser corrigido direto pela tela de Manutenção.
 
 ### 5. Rodar local
 ```bash
@@ -66,6 +67,33 @@ npm run dev
 npm i -g vercel
 vercel --prod
 ```
+
+### 7. Criar o admin (opcional, mas recomendado)
+
+O painel administrativo (`/admin`) permite excluir **qualquer** sala do banco (não só a que você criou) e apagar produtos de vez da base própria — pra quando "desativar" não é suficiente ou o criador da sala perdeu a sessão anônima e ninguém mais consegue apagar. Não tem link visível em nenhuma tela — só é acessível digitando a URL.
+
+1. Firebase Console → **Authentication** → ative o método **E-mail/Senha**
+2. Ainda em Authentication → **Users** → **Add user** → crie um usuário só seu (esse é o admin)
+3. Copie o **User UID** desse usuário
+4. Firebase Console → **Firestore Database** → crie uma coleção chamada **`admins`** → crie um documento cujo **ID seja exatamente esse UID** (o conteúdo do documento pode ficar vazio)
+5. Publique o `firestore.rules` deste projeto (ele já reconhece essa coleção)
+6. Acesse `suaurl.vercel.app/admin` e entre com o e-mail/senha criados no passo 2
+
+> Sem esse setup, a rota `/admin` mostra a tela de login mas ninguém consegue fazer nada nela — as regras do Firestore bloqueiam qualquer exclusão de sala alheia ou remoção definitiva de produto pra quem não tiver um documento em `admins/<uid>`.
+
+### 8. App Check (opcional, recomendado antes de divulgar o app)
+
+Login anônimo aberto significa que, tecnicamente, um script fora do navegador (não uma pessoa usando o app de verdade) consegue chamar as mesmas APIs do Firebase e criar milhares de sessões, salas ou produtos falsos. O [App Check](https://firebase.google.com/docs/app-check) resolve isso: só libera as chamadas ao Firestore/Auth se vierem do seu app de verdade, rodando num navegador de verdade.
+
+**⚠️ Ordem importa — siga exatamente assim, nessa sequência:**
+
+1. Firebase Console → **App Check** → registre um provedor **reCAPTCHA v3** para o seu app web → copie a **chave do site** (site key)
+2. Coloque essa chave em `VITE_RECAPTCHA_SITE_KEY` no `.env` (e nas variáveis de ambiente do Vercel)
+3. Faça o **deploy** com essa variável configurada
+4. Volte no Firebase Console → App Check → confira, na aba de métricas, se as requisições do app estão chegando como **verificadas** (pode levar alguns minutos)
+5. **Só depois de confirmar isso**, vá em Firestore Database → App Check → e ative o **modo de aplicação (enforcement)**
+
+> Se você ativar o enforcement no passo 5 **antes** de confirmar o passo 4, o app para de funcionar pra todo mundo (inclusive você) até reverter. A chave do reCAPTCHA sozinha não faz nada — ela só tem efeito depois que o enforcement é ligado.
 
 ---
 
@@ -124,6 +152,36 @@ Na tela da sala há duas visões da tabela:
 
 ---
 
+## 🔁 Comparar tamanhos/embalagens (novo)
+
+Pra decidir se compensa levar 1 pacote grande em vez de 2 pequenos (ex.: creme dental 75g vs 180g), vincule os dois na base própria:
+
+1. **🛠️ Manutenção de Produtos** → ache o produto → **🔗 Variante** → busque o outro tamanho pelo nome e vincule
+2. O vínculo (`grupoVariante`) fica salvo na base — não precisa refazer em cada cotação
+3. Quando os dois produtos vinculados estiverem na **mesma cotação** e já tiverem **pelo menos um preço lançado**, aparece o bloco **"🔁 Comparar tamanhos/embalagens"** na tela da sala, com o custo por kg/L de cada um lado a lado e o mais em conta destacado
+
+Pra desvincular, use **✂️ Desvincular** na Manutenção. Vincular um produto que já tem outra variante a um terceiro funde os grupos automaticamente, sem perder nenhum vínculo já feito.
+
+> É um vínculo **manual** por escolha — o app não tenta adivinhar por semelhança de nome, porque isso arriscaria juntar produtos diferentes por engano.
+
+---
+
+## 🔗 Link pessoal de participante (novo)
+
+Cada participante tem um link próprio (`.../sala/CODIGO?nome=...&mercado=...`) que reabre a sala **já reconectado como aquela pessoa**, em qualquer aparelho — mesmo sem sessão anterior naquele navegador. Resolve o cenário de perder o acesso no meio de uma cotação (trocar de celular, limpar dados do navegador, etc.): reabrindo o link, a pessoa recupera a própria coluna sem digitar nada de novo e sem perder nenhum preço já lançado (os preços ficam gravados por nome de mercado, não pela sessão de quem lançou).
+
+Onde encontrar:
+- Botão **🔗 Meu link** no topo da sala (visível pra qualquer participante já registrado)
+- Ícone **🔗** ao lado de cada nome na lista de participantes — assim qualquer pessoa da sala pode reenviar o link de alguém que perdeu o próprio, sem depender de quem criou a sala
+
+> Esse link não tem senha — quem tiver o link consegue lançar preço "como" aquela pessoa. Pra esse app (compartilhado entre gente de confiança, sem dado sensível em jogo) é um risco aceitável, mas vale não forwardar o link de terceiros sem necessidade.
+
+**Limitações conhecidas, por design:**
+- O link restaura a coluna de **preço/mercado**, mas **não** o botão "Encerrar sala" pra quem criou a sala — status de criador fica preso ao navegador/sessão original de propósito (senão, qualquer um que soubesse o nome público do criador poderia forjar um link e sequestrar a sala). Se o criador perder o acesso original, a exclusão dessa sala vira tarefa do admin (`/admin`).
+- Reabrir o mesmo link em navegadores/aparelhos diferentes gera uma sessão anônima nova a cada vez, então a lista de participantes pode acumular entradas repetidas com nome+mercado iguais (cada sessão perdida deixa uma "sombra" pra trás). A lista já mescla isso visualmente (mostra só a mais recente + contador de sessões antigas), mas apagar as entradas de verdade do banco só o admin consegue fazer (`/admin` → Todas as salas → ▼ Participantes → 🗑️).
+
+---
+
 ## 🎮 Como usar
 
 1. **Criar:** escaneia/adiciona produtos → código `#X7K9P2`
@@ -140,26 +198,34 @@ Na tela da sala há duas visões da tabela:
 src/
 ├── main.jsx
 ├── App.jsx                  # + botão "Retomar sala"
-├── firebase.js              # base própria + cache offline persistente
+├── firebase.js              # base própria + variantes + cache offline persistente
 ├── index.css
+├── migrarProdutos.js
 ├── utils/
 │   ├── ptBR.js
 │   ├── barcode.js
 │   ├── precos.js            # leitura de preço/oferta + tipos de oferta
-│   └── conexao.js           # status online/offline + última sala
+│   ├── conexao.js           # status online/offline + última sala
+│   ├── linkParticipante.js  # link pessoal de participante (nome+mercado na URL)
+│   └── dialog.js            # substitui alert()/confirm() nativos
 └── components/
     ├── CriarSala.jsx        # Busca híbrida
     ├── EntrarSala.jsx
-    ├── Sala.jsx             # anti-duplicação, abas, aviso offline
+    ├── Sala.jsx             # anti-duplicação, abas, aviso offline, comparação de variantes
     ├── TabelaCotacao.jsx    # selos de oferta + aba cotação completa
     ├── ListaOtimizada.jsx   # agrupamento por categoria + selos
+    ├── VariantesComparacao.jsx  # comparação de custo por kg/L entre tamanhos vinculados
     ├── Participantes.jsx
     ├── BarcodeScanner.jsx
     ├── ProdutoModal.jsx     # lançamento de preço + oferta
     ├── CadastrarProduto.jsx
     ├── ManutencaoProdutos.jsx
     ├── EditarProdutoBase.jsx
+    ├── VincularVariante.jsx     # vincular/desvincular tamanhos do mesmo produto
     ├── MinhasSalas.jsx
+    ├── MigracaoProdutos.jsx
+    ├── Admin.jsx             # painel restrito (excluir qualquer sala, apagar produto de vez)
+    ├── DialogHost.jsx        # modal de confirmação/aviso com a cara do app
     └── ErrorBoundary.jsx
 ```
 
@@ -167,4 +233,4 @@ src/
 
 ## 🗒️ Pendências mapeadas
 
-- **Produtos similares:** indicar equivalentes entre marcas/embalagens (agrupamento na base própria) — ainda não implementado.
+Nenhuma pendência mapeada no momento. (A antiga pendência de "produtos similares" foi implementada — veja **🔁 Comparar tamanhos/embalagens** acima.)
